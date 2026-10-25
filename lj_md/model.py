@@ -1,17 +1,20 @@
 """
 МД-симуляция 2D жидкости Леннарда-Джонса.
 
-Запуск из CLI:
-    python lab2.py --n 200 --rho 0.3 --T 1.0 --steps 20000
-    python lab2.py --mode euler      # сравнение Верле vs Эйлер
-    python lab2.py --mode relax      # демонстрация релаксации
-    python lab2.py --mode all        # всё сразу
+Запуск из CLI (из корня проекта):
+    python -m lj_md.model --n 200 --rho 0.3 --T 1.0 --steps 20000
+    python -m lj_md.model --mode euler      # сравнение Верле vs Эйлер
+    python -m lj_md.model --mode relax      # демонстрация релаксации
+    python -m lj_md.model --mode all        # всё сразу
 
-Тесты:
-    pytest lab2.py -v
+Графики сохраняются в папку results/.
+
+Тесты (из корня проекта):
+    pytest -v
 """
 
 import argparse
+import os
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")  # безопасно для headless; при интерактиве можно убрать
@@ -31,6 +34,14 @@ DEFAULTS = dict(
     cutoff=2.5,
     seed=42,
 )
+
+RESULTS_DIR = "results"
+
+
+def _results_path(filename):
+    """Путь к файлу в папке results/ (папка создаётся при необходимости)."""
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    return os.path.join(RESULTS_DIR, filename)
 
 
 # ============================================================
@@ -209,7 +220,8 @@ def run_md(N=200, rho=0.3, T_target=1.0, dt=0.005,
 # ============================================================
 # Графики
 # ============================================================
-def plot_maxwell(result, outfile="md_lj_2d_maxwell.png"):
+def plot_maxwell(result, outfile=None):
+    outfile = outfile or _results_path("md_lj_2d_maxwell.png")
     V = result["V"]
     T = result["T_measured"]
     E_hist = result["E_hist"]
@@ -248,33 +260,34 @@ def plot_maxwell(result, outfile="md_lj_2d_maxwell.png"):
 
 
 def plot_energy_drift(dt_list, N=200, rho=0.3, T_target=1.0,
-                      N_steps=2000, outfile="md_energy_drift.png"):
-    """Относительный дрейф (E - E0)/E0 для Верле и Эйлера при разных dt."""
+                      t_total=5.0, seed=42, outfile=None):
+    """
+    Относительный дрейф (E - E0)/E0 для Верле и Эйлера при разных dt.
+
+    Для всех dt моделируется одинаковое физическое время t_total,
+    по оси X — время t = шаг * dt, чтобы сравнение было честным.
+    """
+    outfile = outfile or _results_path("md_energy_drift.png")
     fig, ax = plt.subplots(1, 2, figsize=(14, 4.5))
 
     for integ, ax_i in zip(["verlet", "euler"], ax):
         for dt in dt_list:
+            n_steps = int(round(t_total / dt))
+            # N_equil=0: E записывается на каждом шаге с самого начала
             res = run_md(N=N, rho=rho, T_target=T_target, dt=dt,
-                         N_steps=N_steps, N_equil=0, N_sample=10**9,
-                         integrator=integ, seed=42)
-            # Полная энергия по всем шагам нам не отдаётся — пересчитаем
-            # траекторию коротко ещё раз с сохранением E на каждом шаге.
-            rng = np.random.default_rng(42)
-            L = np.sqrt(N / rho)
-            pos = init_positions(N, L, rng)
-            vel = init_velocities_maxwell(N, T_target, rng)
-            forces, U = compute_forces(pos, L)
-            E0 = kinetic_energy(vel) + U
-            Es = [E0]
-            step_fn = velocity_verlet_step if integ == "verlet" else euler_step
-            for _ in range(N_steps):
-                pos, vel, forces, U = step_fn(pos, vel, forces, dt, L)
-                Es.append(kinetic_energy(vel) + U)
-            Es = np.array(Es)
+                         N_steps=n_steps, N_equil=0, N_sample=n_steps,
+                         integrator=integ, seed=seed)
+            E0 = res["E0"]
+            Es = np.concatenate([[E0], res["E_hist"]])
+            t = np.arange(len(Es)) * dt
             drift = (Es - E0) / abs(E0)
-            ax_i.plot(drift, lw=1.0, label=f"dt={dt:g}")
+            ax_i.plot(t, drift, lw=1.0, label=f"dt={dt:g}")
+        if integ == "euler":
+            # Эйлер неустойчив: дрейф растёт на много порядков —
+            # симметричная лог-шкала, чтобы были видны все dt
+            ax_i.set_yscale("symlog", linthresh=1e-4)
         ax_i.set_title(f"{integ.capitalize()}")
-        ax_i.set_xlabel("шаг"); ax_i.set_ylabel("(E - E₀)/E₀")
+        ax_i.set_xlabel("t (в единицах τ)"); ax_i.set_ylabel("(E - E₀)/E₀")
         ax_i.grid(alpha=0.3); ax_i.legend()
 
     plt.tight_layout()
@@ -284,9 +297,10 @@ def plot_energy_drift(dt_list, N=200, rho=0.3, T_target=1.0,
 
 
 def plot_relaxation(N=200, rho=0.3, T_target=1.0, dt=0.005,
-                    N_steps=3000, outfile="md_relaxation.png",
+                    N_steps=3000, outfile=None,
                     snapshots=(0, 50, 200, 1000)):
     """Старт со всех одинаковых |v| -> релаксация к распределению Рэлея."""
+    outfile = outfile or _results_path("md_relaxation.png")
     rng = np.random.default_rng(42)
     L = np.sqrt(N / rho)
     pos = init_positions(N, L, rng)
@@ -294,11 +308,9 @@ def plot_relaxation(N=200, rho=0.3, T_target=1.0, dt=0.005,
     forces, U = compute_forces(pos, L)
 
     snaps = {}
-    all_v = []
     for step in range(N_steps + 1):
         if step in snapshots:
             snaps[step] = vel.copy()
-        all_v.append(vel.copy())
         if step < N_steps:
             pos, vel, forces, U = velocity_verlet_step(pos, vel, forces, dt, L)
 
@@ -368,77 +380,12 @@ def main():
         plot_maxwell(res)
 
     if args.mode in ("euler", "all"):
-        plot_energy_drift(dt_list=[0.001, 0.002, 0.005])
+        plot_energy_drift(dt_list=[0.001, 0.002, 0.005],
+                          N=args.n, rho=args.rho, T_target=args.T,
+                          seed=args.seed)
 
     if args.mode in ("relax", "all"):
         plot_relaxation(N=args.n, rho=args.rho, T_target=args.T, dt=args.dt)
-
-
-# ============================================================
-# pytest-тесты
-# ============================================================
-def test_force_two_particles_r1():
-    """Две частицы на расстоянии r=1: |F| = 24 (по модулю)."""
-    pos = np.array([[0.0, 0.0], [1.0, 0.0]])
-    L = 100.0  # большой бокс, чтобы минимальный образ не влиял
-    forces, U = compute_forces(pos, L, cutoff=2.5)
-    # Частица 0 отталкивается от 1: F0 направлена от 1 к 0, т.е. -x
-    assert np.isclose(forces[0, 0], -24.0), forces[0, 0]
-    assert np.isclose(forces[1, 0], +24.0), forces[1, 0]
-    assert np.isclose(forces[0, 1], 0.0)
-    assert np.isclose(forces[1, 1], 0.0)
-
-
-def test_force_zero_at_rmin():
-    """При r = 2^(1/6) сила Леннарда-Джонса равна нулю."""
-    r_min = 2.0 ** (1.0 / 6.0)
-    pos = np.array([[0.0, 0.0], [r_min, 0.0]])
-    L = 100.0
-    forces, _ = compute_forces(pos, L, cutoff=2.5)
-    assert np.allclose(forces, 0.0, atol=1e-10), forces
-
-
-def test_energy_two_particles_r1():
-    """U(r=1) = 4*(1 - 1) - U_cut = -U_cut (по паре, без двойного счёта)."""
-    pos = np.array([[0.0, 0.0], [1.0, 0.0]])
-    L = 100.0
-    cutoff = 2.5
-    r2_cut = cutoff**2
-    U_cut = 4.0 * (1.0 / r2_cut**6 - 1.0 / r2_cut**3)
-    _, U = compute_forces(pos, L, cutoff)
-    # Внутри cutoff: 4*(1 - 1) = 0, минус U_cut
-    assert np.isclose(U, -U_cut), U
-
-
-def test_no_double_counting_N3():
-    """Для трёх частиц U должна быть суммой по трём парам (не шести)."""
-    r_min = 2.0 ** (1.0 / 6.0)
-    pos = np.array([[0.0, 0.0], [r_min, 0.0], [0.0, r_min]])
-    L = 100.0
-    cutoff = 2.5
-    r2_cut = cutoff**2
-    U_cut = 4.0 * (1.0 / r2_cut**6 - 1.0 / r2_cut**3)
-    _, U = compute_forces(pos, L, cutoff)
-    # Две пары на r_min (U=0 каждая) + одна на r_min*sqrt(2) с U != 0
-    r2 = 2 * r_min**2
-    u_one = 4.0 * (r2**-6 - r2**-3) - U_cut
-    assert np.isclose(U, u_one), (U, u_one)
-
-
-def test_temperature_definition():
-    """T = K/(N-1) в 2D после удаления импульса."""
-    N = 100
-    rng = np.random.default_rng(0)
-    vel = init_velocities_maxwell(N, T_target=1.5, rng=rng)
-    T = temperature(vel)
-    assert np.isclose(T, 1.5, atol=1e-10), T
-
-
-def test_momentum_removed():
-    N = 50
-    rng = np.random.default_rng(1)
-    vel = init_velocities_maxwell(N, 1.0, rng)
-    assert np.allclose(vel.sum(axis=0), 0.0, atol=1e-12)
 
 
 # ============================================================
